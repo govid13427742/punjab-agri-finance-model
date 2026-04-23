@@ -1,7 +1,9 @@
-name: Deploy to GitHub Pages
+name: CI/CD Pipeline
 
 on:
   push:
+    branches: ["main"]
+  pull_request:
     branches: ["main"]
   workflow_dispatch:
 
@@ -15,20 +17,217 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  # ─────────────────────────────────────────────
+  # Stage 1: Validate — lint HTML, CSS, JS
+  # ─────────────────────────────────────────────
+  validate:
+    name: Validate HTML / CSS / JS
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install linters
+        run: npm install -g htmlhint stylelint stylelint-config-standard eslint@8
+
+      - name: Lint HTML
+        run: |
+          echo '{ "tagname-lowercase": true, "attr-lowercase": true, "attr-value-double-quotes": true, "doctype-first": true, "tag-pair": true, "spec-char-escape": false, "id-unique": true, "src-not-empty": true, "title-require": true }' > .htmlhintrc
+          htmlhint "**/*.html"
+
+      - name: Lint CSS
+        run: |
+          echo '{ "extends": "stylelint-config-standard", "rules": { "no-empty-source": null, "font-family-no-missing-generic-family-keyword": null, "selector-class-pattern": null, "custom-property-pattern": null, "declaration-block-no-redundant-longhand-properties": null, "alpha-value-notation": null, "color-function-notation": null, "shorthand-property-no-redundant-values": null, "property-no-vendor-prefix": null, "no-descending-specificity": null } }' > .stylelintrc.json
+          stylelint "css/**/*.css"
+
+      - name: Lint JavaScript
+        run: |
+          echo '{ "env": { "browser": true, "es2021": true }, "parserOptions": { "ecmaVersion": "latest" }, "rules": { "no-undef": "off", "no-unused-vars": "warn" } }' > .eslintrc.json
+          eslint "js/**/*.js"
+
+  # ─────────────────────────────────────────────
+  # Stage 2: Build — verify assets & structure
+  # ─────────────────────────────────────────────
+  build:
+    name: Build & Asset Check
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify project structure
+        run: |
+          echo "=== Checking required files ==="
+          files=("index.html" "css/style.css" "js/app.js")
+          for f in "${files[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "MISSING: $f"
+              exit 1
+            fi
+            echo "OK: $f ($(wc -c < "$f") bytes)"
+          done
+
+      - name: Check for broken internal links
+        run: |
+          echo "=== Checking internal references ==="
+          # Verify CSS and JS referenced in HTML actually exist
+          grep -oP 'href="([^"]*\.css)"' index.html | grep -oP '"[^"]*"' | tr -d '"' | while read -r ref; do
+            if [ ! -f "$ref" ]; then
+              echo "BROKEN LINK: $ref referenced in index.html"
+              exit 1
+            fi
+            echo "OK: $ref"
+          done
+          grep -oP 'src="([^"]*\.js)"' index.html | grep -oP '"[^"]*"' | tr -d '"' | while read -r ref; do
+            if [[ "$ref" != http* ]]; then
+              if [ ! -f "$ref" ]; then
+                echo "BROKEN LINK: $ref referenced in index.html"
+                exit 1
+              fi
+              echo "OK: $ref"
+            else
+              echo "EXTERNAL: $ref (skipped)"
+            fi
+          done
+
+      - name: Check file sizes
+        run: |
+          echo "=== File size report ==="
+          total=0
+          find . -type f \( -name "*.html" -o -name "*.css" -o -name "*.js" \) | sort | while read -r f; do
+            size=$(wc -c < "$f")
+            printf "%-40s %8s bytes\n" "$f" "$size"
+          done
+          echo "---"
+          total=$(find . -type f \( -name "*.html" -o -name "*.css" -o -name "*.js" \) -exec cat {} + | wc -c)
+          echo "Total payload: $total bytes ($(echo "scale=1; $total/1024" | bc) KB)"
+
       - name: Setup Pages
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: actions/configure-pages@v5
+
       - name: Upload artifact
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
           path: '.'
+
+  # ─────────────────────────────────────────────
+  # Stage 3: Deploy — push to GitHub Pages
+  # ─────────────────────────────────────────────
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+  # ─────────────────────────────────────────────
+  # Stage 4: Smoke Test — verify live site
+  # ─────────────────────────────────────────────
+  smoke-test:
+    name: Smoke Test Live Site
+    needs: deploy
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Wait for deployment propagation
+        run: sleep 15
+
+      - name: Check site is reachable
+        run: |
+          SITE_URL="https://govid13427742.github.io/punjab-agri-finance-model/"
+          echo "=== Testing: $SITE_URL ==="
+
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$SITE_URL")
+          if [ "$STATUS" -ne 200 ]; then
+            echo "FAIL: Site returned HTTP $STATUS"
+            exit 1
+          fi
+          echo "PASS: Site returned HTTP 200"
+
+      - name: Validate page content
+        run: |
+          SITE_URL="https://govid13427742.github.io/punjab-agri-finance-model/"
+          BODY=$(curl -s "$SITE_URL")
+
+          checks=(
+            "Punjab Agricultural Finance"
+            "Cyclic Village Economy"
+            "SME"
+            "Surplus"
+            "Middle East"
+            "chart.js"
+            "style.css"
+            "app.js"
+          )
+
+          FAILED=0
+          for check in "${checks[@]}"; do
+            if echo "$BODY" | grep -qi "$check"; then
+              echo "PASS: Found '$check'"
+            else
+              echo "FAIL: Missing '$check'"
+              FAILED=1
+            fi
+          done
+
+          if [ "$FAILED" -eq 1 ]; then
+            exit 1
+          fi
+
+      - name: Check CSS loads
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://govid13427742.github.io/punjab-agri-finance-model/css/style.css")
+          if [ "$STATUS" -ne 200 ]; then
+            echo "FAIL: CSS returned HTTP $STATUS"
+            exit 1
+          fi
+          echo "PASS: CSS loaded (HTTP 200)"
+
+      - name: Check JS loads
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://govid13427742.github.io/punjab-agri-finance-model/js/app.js")
+          if [ "$STATUS" -ne 200 ]; then
+            echo "FAIL: JS returned HTTP $STATUS"
+            exit 1
+          fi
+          echo "PASS: JS loaded (HTTP 200)"
+
+      - name: Performance check
+        run: |
+          SITE_URL="https://govid13427742.github.io/punjab-agri-finance-model/"
+          echo "=== Performance Metrics ==="
+
+          METRICS=$(curl -s -o /dev/null -w "DNS: %{time_namelookup}s\nConnect: %{time_connect}s\nTTFB: %{time_starttransfer}s\nTotal: %{time_total}s\nSize: %{size_download} bytes\n" "$SITE_URL")
+          echo "$METRICS"
+
+          TOTAL=$(curl -s -o /dev/null -w "%{time_total}" "$SITE_URL")
+          THRESHOLD=5
+          if (( $(echo "$TOTAL > $THRESHOLD" | bc -l) )); then
+            echo "WARN: Total load time ${TOTAL}s exceeds ${THRESHOLD}s threshold"
+          else
+            echo "PASS: Total load time ${TOTAL}s within ${THRESHOLD}s threshold"
+          fi
+
+      - name: Summary
+        run: |
+          echo "========================================"
+          echo "  DEPLOYMENT VERIFIED SUCCESSFULLY"
+          echo "  URL: https://govid13427742.github.io/punjab-agri-finance-model/"
+          echo "========================================"
