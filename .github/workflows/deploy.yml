@@ -42,7 +42,7 @@ jobs:
 
       - name: Lint CSS
         run: |
-          echo '{ "extends": "stylelint-config-standard", "rules": { "no-empty-source": null, "font-family-no-missing-generic-family-keyword": null, "selector-class-pattern": null, "custom-property-pattern": null, "declaration-block-no-redundant-longhand-properties": null, "alpha-value-notation": null, "color-function-notation": null, "shorthand-property-no-redundant-values": null, "property-no-vendor-prefix": null, "no-descending-specificity": null } }' > .stylelintrc.json
+          echo '{ "extends": "stylelint-config-standard", "rules": { "no-empty-source": null, "font-family-no-missing-generic-family-keyword": null, "selector-class-pattern": null, "custom-property-pattern": null, "declaration-block-no-redundant-longhand-properties": null, "alpha-value-notation": null, "color-function-notation": null, "color-function-alias-notation": null, "shorthand-property-no-redundant-values": null, "property-no-vendor-prefix": null, "no-descending-specificity": null, "keyframes-name-pattern": null, "declaration-block-single-line-max-declarations": null, "media-feature-range-notation": null } }' > .stylelintrc.json
           stylelint "css/**/*.css"
 
       - name: Lint JavaScript
